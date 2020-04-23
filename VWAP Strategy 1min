@@ -1,0 +1,184 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © kx0
+
+//@version=4
+
+strategy("VWAP Strategy 1min", overlay=true)
+
+// Input - date filtering
+
+DateFilter = input(true, "Date Range Filtering")
+FromYear = input(2020, "From Year", minval = 1900)
+FromMonth = input(4, "From Month", minval = 1, maxval = 12)
+FromDay = input(1, "From Day", minval = 1, maxval = 31)
+ToYear = input(2020, "To Year", minval = 1900)
+ToMonth = input(4, "To Month", minval = 1, maxval = 12)
+ToDay = input(17, "To Day", minval = 1, maxval = 31)
+FromDate = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+ToDate = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+TradeDateIsAllowed() => DateFilter ? (time >= FromDate and time <= ToDate) : true
+
+// Input - positioning
+
+positionSize = input(1000, "Default position size", input.integer)
+stopLoss = input(250, "Stop Loss ticks", input.integer)
+allIn = input(10000, "Max position size", input.integer)
+
+// Input - strategy and execution
+
+volSum = input(60, "Volume requirement", input.integer)
+alen = input(title="ADD study length", type=input.integer, defval=8)
+aal = input(title = "ADD advance limit entry", type=input.float, defval=20.0)
+adl = (0 - input(title = "ADD decline limit entry", type = input.float, defval=20.0))
+aalExit = input(title = "ADD advance limit exit", type=input.float, defval=250.0)
+adlExit = (0 - input(title = "ADD decline limit exit", type = input.float, defval=250.0))
+vlen = input(title="VOLD study length", type=input.integer, defval=16)
+val = input(title = "VOLD advance limit entry", type=input.float, defval=5000000.0)
+vdl = (0 - input(title = "VOLD decline limit entry", type = input.float, defval=5000000.0))
+len = input(1, "Allowable trade lag", type=input.integer)
+errPercent = input(0.05, "Allowable trade error %", type=input.float)
+dev1 = input(2.01, title="Target stdev band RTH")
+dev2 = input(2.51, title="Target stdev band ETH")
+devLim = input(10.0, title="Minimum 1-sigma band for trade execution", type=input.float)
+
+// Processing - session determination
+
+t = time(timeframe.period, "1000-1600")
+te = time(timeframe.period, "2000-0900")
+tx = time(timeframe.period, "0000-0000")
+eth = na(t)
+newSession = tx - tx[1] > 60000
+
+// Processing - extract VWAP variables
+
+vwapsum = 0.0
+volumesum = 0.0
+v2sum = 0.0
+price = input(close)
+
+vwapsum := iff(newSession, hl2 * volume, vwapsum[1] + hl2 * volume)
+volumesum := iff(newSession, volume, volumesum[1] + volume)
+v2sum := iff(newSession, volume * hl2 * hl2, v2sum[1] + volume * hl2 * hl2)
+
+myvwap = vwapsum / volumesum
+dev = sqrt(max(v2sum / volumesum - myvwap * myvwap, 0))
+
+devUp1 = dev1
+devDn1 = 0 - dev1
+devUp2 = dev2
+devDn2 = 0 - dev2
+
+myvwapu1 = myvwap + devUp1 * dev
+myvwapd1 = myvwap + devDn1 * dev
+myvwapu2 = myvwap + devUp2 * dev
+myvwapd2 = myvwap + devDn2 * dev
+
+
+// Processing - extract internals variables 
+
+ao = security("USI:ADD", "1", open)
+ac = security("USI:ADD", "1", close)
+ah = security("USI:ADD", "1", high)
+al = security("USI:ADD", "1", low)
+aroc = ac - ac[alen]
+arocVal = newSession ? 0 : aroc
+aroc2 = aroc - aroc[alen]
+aroc2Val = newSession ? 0 : aroc2
+
+vo = security("USI:VOLD", "1", open)
+vc = security("USI:VOLD", "1", close)
+vh = security("USI:VOLD", "1", high)
+vl = security("USI:VOLD", "1", low)
+vroc = vc - vc[vlen]
+vrocVal = newSession ? 0 : vroc
+vroc2 = vroc - vroc[vlen]
+vroc2Val = newSession ? 0 : vroc2
+
+// Processing - extract other variables
+
+err = errPercent / 100
+
+secLong = security(syminfo.tickerid, "1", low)
+secShort = security(syminfo.tickerid, "1", high)
+
+// Execution - Long entry 
+
+stratLongEntry1 = 
+   lowest(secLong, len) <= (myvwapd1 + myvwapd1 * err)
+     and volumesum > volSum * volume 
+      and aroc2Val > adl 
+       and vroc2Val > vdl
+         and dev > devLim
+          and hour(time) < 15
+           and not na(t)
+          
+stratLongEntry2 = 
+   lowest(secLong, len) <= (myvwapd2 + myvwapd2 * err)
+     and dev > devLim
+      and not na(te)
+                   
+strategy.entry("long", strategy.long, positionSize, when=
+   strategy.position_size <= allIn
+      and stratLongEntry1)
+      
+strategy.entry("long", strategy.long, positionSize, when=
+   strategy.position_size <= allIn
+      and stratLongEntry2)
+
+// Execution - Long exit 
+
+stratLongExit = 
+   high > (myvwap - (myvwap * err))
+     or aroc <= adlExit
+      
+strategy.close("long", when=stratLongExit)
+
+// Execution - Long stop 
+
+strategy.exit("stop-long", "long", loss = stopLoss)
+
+// Execution - Short entry 
+
+stratShortEntry1 = highest(secShort, len) >= (myvwapu1 - myvwapu1 * err)
+   and volumesum > volSum * volume
+     and aroc2Val < aal
+      and vroc2Val < val
+       and dev > devLim
+         and hour(time) < 15
+          and not na(t)
+         
+stratShortEntry2 = 
+   highest(secShort, len) >= (myvwapu2 + myvwapu2 * err)
+     and dev > devLim
+      and not na(te)
+         
+strategy.entry("short", strategy.short, positionSize, when=
+   strategy.position_size >= (0 - allIn)
+     and stratShortEntry1)
+     
+strategy.entry("short", strategy.short, positionSize, when=
+   strategy.position_size >= (0 - allIn)
+     and stratShortEntry2)
+
+// Execution - Short exit
+
+stratShortExit = low < (myvwap + (myvwap * err))
+   or aroc >= aalExit
+      
+strategy.close("short", when=strategy.position_size < 0 and stratShortExit)
+
+// Execution - Short stop
+
+strategy.exit("stop-short", "short", loss = stopLoss)
+
+// Alerts
+
+alertcondition(stratLongEntry1, "BTO signal ES RTH", "BTO Signal ES RTH")
+alertcondition(stratLongEntry2, "BTO signal ES ETH", "BTO Signal ES ETH")
+alertcondition(stratLongExit, "STC signal ES", "STC Signal ES")
+alertcondition(stratShortEntry1, "STO signal ES RTH", "STO Signal ES RTH")
+alertcondition(stratShortEntry2, "STO signal ES ETH", "STO Signal ES ETH")
+alertcondition(stratShortExit, "BTC signal ES", "BTC Signal ES")
+
+// Plots 
+    
